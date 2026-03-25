@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 學習朗讀王 - 無縫重錄版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .app-shell { width: 100%; max-width: 420px; height: 92vh; background: #ffffff; display: flex; flex-direction: column; position: relative; box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1); border-radius: 2rem; overflow: hidden; border: 6px solid #fff; }
+        .scroll-area { flex: 1; overflow-y: auto; padding: 1.25rem; }
+        .btn-active:active { transform: scale(0.96); transition: 0.1s; }
+        .recording-glow { animation: pulse-red 1.5s infinite; }
+        @keyframes pulse-red { 0% { box-shadow: 0 0 0 0px rgba(239, 68, 68, 0.4); transform: scale(1); } 70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); transform: scale(1.1); } 100% { box-shadow: 0 0 0 0px rgba(239, 68, 68, 0); transform: scale(1); } }
+        
+        /* 朗讀文字顏色標示 */
+        .word-correct { color: #10b981; }
+        .word-error { color: #ef4444; font-weight: 900; background-color: #fee2e2; border-radius: 4px; padding: 0 2px; }
+        .word-miss { color: #94a3b8; text-decoration: underline; text-decoration-style: dotted; }
+        .word-punct { color: #334155; }
+
+        .toast { animation: slide-up 0.3s ease-out; z-index: 100; position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); }
+        @keyframes slide-up { from { transform: translateY(20px) translateX(-50%); opacity: 0; } to { transform: translateY(0) translateX(-50%); opacity: 1; } }
+        
+        .pet-bounce { animation: bounce 2s infinite; }
+        @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+        
+        .progress-bar { height: 8px; border-radius: 4px; background: #e2e8f0; overflow: hidden; }
+        .progress-fill { height: 100%; transition: width 0.3s; }
+
+        /* 隱藏滾動條 */
+        .scroll-area::-webkit-scrollbar { width: 0px; background: transparent; }
+    </style>
+</head>
+<body>
+
+    <div class="app-shell" id="app-root"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // 智慧環境偵測
+        let firebaseConfig;
+        let isCanvasEnv = false;
+        let currentAppId = 'cyoreadaloud';
+
+        if (typeof __firebase_config !== 'undefined') {
+            firebaseConfig = JSON.parse(__firebase_config);
+            isCanvasEnv = true;
+            currentAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        } else {
+            firebaseConfig = {
+                apiKey: "AIzaSyDstJ9VYYfVJgjak92oI5C4-lCHtK7VtNw",
+                authDomain: "cyoreadaloud.firebaseapp.com",
+                projectId: "cyoreadaloud",
+                storageBucket: "cyoreadaloud.firebasestorage.app",
+                messagingSenderId: "910080502818",
+                appId: "1:910080502818:web:e8b1ac894374eb5412ee7b"
+            };
+        }
+
+        // 初始化 Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        function getUserDocRef(username) {
+            if (isCanvasEnv) {
+                return doc(db, 'artifacts', currentAppId, 'public', 'data', 'users', username);
+            } else {
+                return doc(db, "users", username);
+            }
+        }
+
+        // --- 全局停止語音函數 ---
+        const stopTTS = () => {
+            if (window.speechSynthesis) {
+                window.speechSynthesis.cancel();
+            }
+        };
+
+        // --- 升級版資料庫與題庫 ---
+        const generateDB = () => {
+            const db = {};
+            
+            // --- P1 內容 ---
+            const p1_zh = [
+                { title: "《春曉》孟浩然", content: "春眠不覺曉，處處聞啼鳥。夜來風雨聲，花落知多少。", tts: { "zh-HK": "春眠不角曉，處處聞啼鳥。夜來風雨聲，花落知多少。" } },
+                { title: "《詠鵝》駱賓王", content: "鵝，鵝，鵝，曲項向天歌。白毛浮綠水，紅掌撥清波。" },
+                { title: "我的家", content: "我有一個溫暖的家。家裡有爸爸、媽媽和我。我們每天都很快樂。" },
+                { title: "上學去", content: "早上，太陽出來了。我背著書包去上學。在學校裡，我會用心聽課。" }
+            ];
+            const p1_en = [
+                { title: "Good Morning", content: "Good morning! I wake up early. I wash my face and brush my teeth." },
+                { title: "My Toy", content: "I have a red car. It goes very fast. I like to play with my toy car." },
+                { title: "The Cat", content: "The cat is on the mat. It is a fat cat. It sleeps all day." },
+                { title: "Colors", content: "I see a blue bird. I see a yellow sun. The world is full of colors." }
+            ];
+
+            // --- P2 內容 ---
+            const p2_zh = [
+                { title: "《靜夜思》李白", content: "床前明月光，疑是地上霜。舉頭望明月，低頭思故鄉。" },
+                { title: "《憫農》李紳", content: "鋤禾日當午，汗滴禾下土。誰知盤中飧，粒粒皆辛苦。" },
+                { title: "公園玩耍", content: "星期天，爸爸帶我去公園玩。我們在草地上奔跑，還看到了美麗的蝴蝶。" },
+                { title: "幫助別人", content: "小明不小心跌倒了。我跑過去扶他起來。老師稱讚我是一個好孩子。" }
+            ];
+            const p2_en = [
+                { title: "At the Park", content: "We go to the park on Sunday. I play on the slide. My sister plays on the swings." },
+                { title: "My Friend", content: "Tom is my good friend. We play football together. We always have a lot of fun." },
+                { title: "The Little Dog", content: "The little dog runs fast. It wants to catch the ball. The dog is very happy." },
+                { title: "Yummy Food", content: "I like to eat apples and bananas. They are sweet. Drinking milk makes me strong." }
+            ];
+
+            // --- P3 內容 ---
+            const p3_zh = [
+                { title: "《遊子吟》孟郊", content: "慈母手中線，遊子身上衣。臨行密密縫，意恐遲遲歸。" },
+                { title: "《江雪》柳宗元", content: "千山鳥飛絕，萬徑人蹤滅。孤舟簑笠翁，獨釣寒江雪。" },
+                { title: "龜兔賽跑", content: "兔子驕傲地在樹下睡覺，烏龜卻一步一步慢慢爬。最後，烏龜贏得了比賽，兔子後悔極了。" },
+                { title: "秋天的樹林", content: "秋天到了，樹葉變成黃色和紅色。一陣風吹過，落葉像蝴蝶一樣在空中飛舞。" }
+            ];
+            const p3_en = [
+                { title: "A Sunny Day", content: "Today is a sunny day. The sky is blue and clear. We can go outside and ride our bikes." },
+                { title: "Reading Books", content: "I like reading storybooks. Books take me to magical places. I read every night before bed." },
+                { title: "Helping Mom", content: "Mom is cooking dinner. I help her set the table. We eat delicious food together." },
+                { title: "The Zoo", content: "Yesterday we went to the zoo. We saw tall giraffes and big elephants. It was an exciting trip." }
+            ];
+
+            // --- P4 內容 ---
+            const p4_zh = [
+                { title: "《登鸛雀樓》王之渙", content: "白日依山盡，黃河入海流。欲窮千里目，更上一層樓。" },
+                { title: "《清明》杜牧", content: "清明時節雨紛紛，路上行人欲斷魂。借問酒家何處有，牧童遙指杏花村。" },
+                { title: "守株待兔", content: "農夫看見兔子撞死在樹樁上，便放下農具，每天守在樹旁等兔子，結果田地都荒廢了。" },
+                { title: "維港夜景", content: "香港的維多利亞港夜景世界聞名。每當夜幕低垂，兩岸大廈燈火通明，非常迷人。" }
+            ];
+            const p4_en = [
+                { title: "A New Hobby", content: "I started learning how to draw. It is very relaxing. I want to paint a beautiful picture for my parents." },
+                { title: "Sports Day", content: "Our school had a sports day. I ran in the relay race. Our team won a gold medal!" },
+                { title: "The Ocean", content: "The ocean is vast and deep. Dolphins jump out of the water. We must protect the sea creatures." },
+                { title: "My Dream", content: "When I grow up, I want to be a doctor. I want to help sick people get better and stay healthy." }
+            ];
+
+            // --- P5 內容 ---
+            const p5_zh = [
+                { title: "《九月九日憶山東兄弟》", content: "獨在異鄉為異客，每逢佳節倍思親。遙知兄弟登高處，遍插茱萸少一人。" },
+                { title: "《出塞》王昌齡", content: "秦時明月漢時關，萬里長征人未還。但使龍城飛將在，不教胡馬度陰山。" },
+                { title: "拔苗助長", content: "從前有個人嫌禾苗長得太慢，於是把禾苗一棵棵拔高。結果禾苗枯死了，這告訴我們做事不能急於求成。" },
+                { title: "科技的進步", content: "隨著科技的進步，生活變得越來越方便。智能手機讓我們可以隨時隨地與世界各地的人聯繫。" }
+            ];
+            const p5_en = [
+                { title: "The Solar System", content: "There are eight planets in our solar system. The Earth is the third planet from the sun. We live on a beautiful blue planet." },
+                { title: "A Trip to the Museum", content: "We visited the history museum last week. We learned about ancient civilizations and saw dinosaur fossils." },
+                { title: "Teamwork", content: "Teamwork is very important. When we work together, we can solve difficult problems and achieve our goals faster." },
+                { title: "Healthy Habits", content: "Drinking plenty of water and eating vegetables are healthy habits. Exercise also keeps our body strong and energetic." }
+            ];
+
+            // --- P6 內容 ---
+            const p6_zh = [
+                { title: "《水調歌頭》蘇軾", content: "明月幾時有？把酒問青天。不知天上宮闕，今夕是何年。人有悲歡離合，月有陰晴圓缺，此事古難全。" },
+                { title: "《滿江紅》岳飛", content: "怒髮衝冠，憑欄處，瀟瀟雨歇。抬望眼，仰天長嘯，壯懷激烈。三十功名塵與土，八千里路雲和月。" },
+                { title: "掩耳盜鈴", content: "有一個人想偷大鐘，但他怕敲碎鐘時被人發現，於是把自己的耳朵塞住。這是自欺欺人的行為。" },
+                { title: "保護環境", content: "地球是我們共同的家園。為了減少污染，我們應該積極參與回收，節約用水用電，為保護環境出一分力。" }
+            ];
+            const p6_en = [
+                { title: "Climate Change", content: "Climate change is a global challenge. Rising temperatures affect the weather and animal habitats. We must reduce carbon emissions." },
+                { title: "Artificial Intelligence", content: "AI technology is changing the world. It helps us with daily tasks and can even drive cars. We need to learn how to use it wisely." },
+                { title: "A Great Leader", content: "A good leader listens to others and makes fair decisions. They inspire their team to work hard and never give up on their dreams." },
+                { title: "Traveling Abroad", content: "Traveling to different countries allows us to experience new cultures. We can taste exotic foods and make friends from all over the world." }
+            ];
+
+            // 組合年級資料
+            db["P1"] = { "zh-HK": p1_zh, "zh-CN": p1_zh, "en-US": p1_en };
+            db["P2"] = { "zh-HK": p2_zh, "zh-CN": p2_zh, "en-US": p2_en };
+            db["P3"] = { "zh-HK": p3_zh, "zh-CN": p3_zh, "en-US": p3_en };
+            db["P4"] = { "zh-HK": p4_zh, "zh-CN": p4_zh, "en-US": p4_en };
+            db["P5"] = { "zh-HK": p5_zh, "zh-CN": p5_zh, "en-US": p5_en };
+            db["P6"] = { "zh-HK": p6_zh, "zh-CN": p6_zh, "en-US": p6_en };
+
+            return db;
+        };
+        const READING_DB = generateDB();
+        
+        // --- 成語題庫 ---
+        const IDIOMS = [
+            { q: "形容色彩鮮艷，式樣繁多？", a: "五光十色", options: ["五光十色", "一絲不苟", "鳥語花香", "各式各樣"] },
+            { q: "形容說話或辦事有條有理，一點兒也不混亂？", a: "井井有條", options: ["井井有條", "胡言亂語", "半途而廢", "畫蛇添足"] },
+            { q: "鳥兒歌唱，花開芬芳。形容春天的美好景象？", a: "鳥語花香", options: ["風雨交加", "鳥語花香", "千變萬化", "津津有味"] },
+            { q: "團結一致，共同努力？", a: "同心協力", options: ["同心協力", "自相矛盾", "守望相助", "半途而廢"] },
+            { q: "為了對付盜賊或災禍，鄰居互相幫忙？", a: "守望相助", options: ["拔苗助長", "守望相助", "對牛彈琴", "亡羊補牢"] },
+            { q: "形容趣味濃厚的樣子。也指吃得很有味道？", a: "津津有味", options: ["津津有味", "不慌不忙", "一絲不苟", "口若懸河"] },
+            { q: "比喻自己的言行前後互相抵觸？", a: "自相矛盾", options: ["畫蛇添足", "自相矛盾", "對牛彈琴", "掩耳盜鈴"] },
+            { q: "形容人說話滔滔不絕，像流水一樣？", a: "口若懸河", options: ["口若懸河", "沈默寡言", "井井有條", "一字千金"] },
+            { q: "比喻做事非常認真，一點也不馬虎？", a: "一絲不苟", options: ["一絲不苟", "馬馬虎虎", "半途而廢", "粗心大意"] },
+            { q: "做事做到一半就停止，比喻不能堅持到底？", a: "半途而廢", options: ["半途而廢", "堅持不懈", "同心協力", "持之以恆"] },
+            { q: "比喻多此一舉，反而弄巧成拙？", a: "畫蛇添足", options: ["畫龍點睛", "畫蛇添足", "錦上添花", "亡羊補牢"] },
+            { q: "比喻不主動努力，存僥倖心理，希望得到意外的收穫？", a: "守株待兔", options: ["守株待兔", "刻舟求劍", "緣木求魚", "掩耳盜鈴"] },
+            { q: "比喻出了問題以後想辦法補救，可以防止繼續受損失？", a: "亡羊補牢", options: ["亡羊補牢", "防微杜漸", "未雨綢繆", "亡魂喪膽"] },
+            { q: "形容態度鎮定，不慌張，不急促？", a: "不慌不忙", options: ["手忙腳亂", "不慌不忙", "津津有味", "千變萬化"] },
+            { q: "形容事物變化非常多？", a: "千變萬化", options: ["千變萬化", "一成不變", "井井有條", "各式各樣"] }
+        ];
+
+        // --- 狀態管理 ---
+        const defaultState = {
+            view: 'login',
+            coins: 100, grade: 'P1', lang: 'zh-HK', mathType: 'add',
+            currentText: null, isMicOn: false, message: null, evalResult: null,
+            mathGame: { q: '', a: 0, type: 'add' }, idiomGame: { current: 0 },
+            pet: { 
+                hunger: 80, hygiene: 90, exp: 0, level: 1, 
+                badges: 0, lastTick: Date.now(), 
+                goodStateSince: Date.now(), badStateSince: null 
+            }
+        };
+
+        let state = { ...defaultState };
+        let currentUser = null; 
+        let recognitionInstance = null;
+
+        // --- 解決 Module Scope 問題 ---
+        window.setGrade = (g) => { stopTTS(); state.grade = g; window.setView('reading-lang'); };
+        window.setLang = (l) => { stopTTS(); state.lang = l; window.setView('reading-list'); };
+        window.playText = (index) => { 
+            stopTTS();
+            state.currentText = READING_DB[state.grade][state.lang][index]; 
+            window.setView('reading-play'); 
+        };
+        window.retryReading = () => { stopTTS(); state.evalResult = null; render(); };
+
+        // --- Firebase 雲端存檔 ---
+        async function loadDataFromCloud(username) {
+            try {
+                if (!auth.currentUser) {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                }
+
+                const docRef = getUserDocRef(username);
+                const docSnap = await getDoc(docRef);
+
+                if (docSnap.exists()) {
+                    const parsed = docSnap.data();
+                    state = { ...defaultState, ...parsed, pet: { ...defaultState.pet, ...parsed.pet } };
+                    showMessage(`歡迎回來，${username}！`, 'success');
+                } else {
+                    state = { ...defaultState, view: 'home' }; 
+                    await setDoc(docRef, state);
+                    showMessage(`歡迎新同學：${username}！`, 'success');
+                }
+                
+                state.view = 'home';
+                state.isMicOn = false; 
+                state.message = null; 
+                state.evalResult = null;
+                
+                catchUpTime(); 
+                render();
+            } catch (error) {
+                console.error("讀取資料失敗:", error);
+                if (error.code === 'permission-denied') {
+                    showMessage("資料庫權限不足！請記得去 Firebase 更新 Rules 喔！", 'error');
+                } else {
+                    showMessage("系統連線失敗，請稍後再試", 'error');
+                }
+                state.view = 'login';
+                render();
+            }
+        }
+
+        async function saveState() {
+            if (!currentUser || !auth.currentUser) return; 
+            
+            const toSave = { ...state };
+            delete toSave.currentText;
+            delete toSave.isMicOn;
+            delete toSave.message;
+            delete toSave.evalResult;
+            delete toSave.view; 
+            
+            try {
+                const docRef = getUserDocRef(currentUser);
+                await setDoc(docRef, toSave);
+            } catch (error) {
+                console.error("儲存資料失敗:", error);
+                if (error.code === 'permission-denied') {
+                    showMessage("存檔失敗：權限不足", 'error');
+                }
+            }
+        }
+
+        // --- 登入與登出 ---
+        window.handleLogin = () => {
+            const input = document.getElementById('usernameInput');
+            const username = input.value.trim();
+            
+            if (!username) return showMessage("請輸入你的名字！", 'error');
+            if (username.length > 10) return showMessage("名字太長了，請使用簡短名稱", 'error');
+            
+            sessionStorage.setItem('readaloud_user', username);
+            
+            currentUser = username;
+            state.view = 'loading';
+            render();
+            
+            loadDataFromCloud(username);
+        };
+
+        window.handleLogout = () => {
+            stopTTS();
+            sessionStorage.removeItem('readaloud_user');
+            currentUser = null;
+            state = { ...defaultState, view: 'login' };
+            render();
+        };
+
+        // --- 核心邏輯 (寵物時間流逝) ---
+        function catchUpTime() {
+            if (!currentUser) return;
+            const now = Date.now();
+            const msPerHour = 3600 * 1000;
+            let hoursPassed = Math.floor((now - state.pet.lastTick) / msPerHour);
+
+            if (hoursPassed > 0) {
+                for(let i=0; i<hoursPassed; i++) {
+                    state.pet.hunger = Math.max(0, state.pet.hunger - 2);
+                    state.pet.hygiene = Math.max(0, state.pet.hygiene - 2);
+                    const isGood = state.pet.hunger >= 80 && state.pet.hygiene >= 80;
+                    const tickTime = state.pet.lastTick + ((i+1) * msPerHour);
+
+                    if (isGood) {
+                        state.pet.badStateSince = null;
+                        if (!state.pet.goodStateSince) state.pet.goodStateSince = tickTime;
+                        if (tickTime - state.pet.goodStateSince >= 24 * msPerHour) {
+                            state.pet.badges = Math.min(5, state.pet.badges + 1);
+                            state.pet.goodStateSince = tickTime;
+                        }
+                    } else {
+                        state.pet.goodStateSince = null;
+                        if (!state.pet.badStateSince) state.pet.badStateSince = tickTime;
+                        if (tickTime - state.pet.badStateSince >= 24 * msPerHour) {
+                            state.pet.badges = Math.max(0, state.pet.badges - 1);
+                            state.pet.badStateSince = tickTime;
+                        }
+                    }
+                }
+                state.pet.lastTick += hoursPassed * msPerHour;
+                saveState();
+            }
+        }
+
+        setInterval(() => {
+            if (currentUser && state.view === 'home') {
+                catchUpTime();
+                render();
+            }
+        }, 60000);
+
+        function updatePetStatusImmediate() {
+            const isGood = state.pet.hunger >= 80 && state.pet.hygiene >= 80;
+            const now = Date.now();
+            if (isGood) {
+                state.pet.badStateSince = null;
+                if (!state.pet.goodStateSince) state.pet.goodStateSince = now;
+            } else {
+                state.pet.goodStateSince = null;
+                if (!state.pet.badStateSince) state.pet.badStateSince = now;
+            }
+            saveState();
+        }
+
+        // --- 介面控制 ---
+        window.setView = (v) => { 
+            stopTTS(); 
+            state.view = v; 
+            state.message = null; 
+            if(v !== 'reading-play' || !state.evalResult) state.evalResult = null; 
+            if (v === 'idiom') window.startIdiom();
+            render(); 
+        };
+
+        function showMessage(text, type = 'info') {
+            state.message = { text, type };
+            render();
+            setTimeout(() => { if (state.message?.text === text) { state.message = null; render(); } }, 4000);
+        }
+
+        // --- 朗讀評估 (加入多音字與異讀音智慧容錯) ---
+        window.runAssessment = (userText) => {
+            // 【關鍵修復點 1】：只要進入評分階段，代表已經成功拿到結果
+            // 立刻將麥克風狀態設為 false，這樣 onend 觸發時就不會誤以為是異常結束
+            state.isMicOn = false; 
+
+            const rawOriginal = state.currentText.content;
+            const recognized = userText.replace(/[，。？！、：；「」\s]/g, "").toLowerCase();
+            let resultWords = [], errors = 0, misses = 0, recIndex = 0;
+
+            const isCharMatch = (expected, actual) => {
+                if (expected === actual) return true;
+                const alts = {
+                    '覺': '教角各較交覺', '少': '小兆少', '行': '航衡恆形行', '長': '掌獎場腸常長',
+                    '和': '禾禍臥汗和', '冠': '官館貫冠', '塞': '賽色塞', '將': '蔣獎江將',
+                    '還': '環寰灣還', '難': '蘭難', '分': '份分', '地': '的得地', '的': '地得的', '得': '地的得',
+                    '著': '着住著', '着': '著住着', '那': '哪那', '哪': '那哪', '只': '隻只', '隻': '只隻',
+                    '裡': '裏里裡', '裏': '裡里裏', '里': '裡裏里'
+                };
+                return alts[expected] && alts[expected].includes(actual);
+            };
+
+            for (let i = 0; i < rawOriginal.length; i++) {
+                const char = rawOriginal[i];
+                if (/[，。？！、：；「」\s]/.test(char)) { resultWords.push({ char, status: 'punct' }); continue; }
+                if (recIndex < recognized.length) {
+                    if (isCharMatch(char.toLowerCase(), recognized[recIndex])) {
+                        resultWords.push({ char, status: 'correct' });
+                    } else { 
+                        resultWords.push({ char, status: 'error' }); 
+                        errors++; 
+                    }
+                    recIndex++;
+                } else { resultWords.push({ char, status: 'miss' }); misses++; }
+            }
+
+            const totalFaults = errors + misses;
+            let reward = totalFaults === 0 ? 30 : (totalFaults <= 3 ? 20 : (totalFaults <= 6 ? 10 : 0));
+
+            state.evalResult = { words: resultWords, score: reward };
+            if (reward > 0) {
+                state.coins += reward;
+                addExp(reward);
+                showMessage(`太棒了！獲得 ${reward} 金幣`, 'success');
+                saveState();
+            } else showMessage(`有 ${totalFaults} 個錯漏字，再試一次吧！`, 'error');
+            render();
+        };
+
+        window.toggleMic = () => {
+            stopTTS(); 
+            
+            const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!Speech) return showMessage("瀏覽器不支援語音功能", "error");
+
+            // 如果目前正在錄音中，表示使用者想手動停止
+            if (state.isMicOn) {
+                if (recognitionInstance) {
+                    try { recognitionInstance.stop(); } catch(e){}
+                }
+                return; 
+            }
+
+            // 【關鍵修復點 2】：在建立新的錄音前，確保舊的完全被中斷(abort)，避免卡住在背景
+            if (recognitionInstance) {
+                try { recognitionInstance.abort(); } catch(e){}
+                recognitionInstance = null;
+            }
+
+            // 清理舊狀態
+            state.evalResult = null; 
+            state.message = null; 
+            render();
+
+            recognitionInstance = new Speech();
+            recognitionInstance.lang = state.lang;
+            recognitionInstance.interimResults = false;
+            
+            recognitionInstance.onstart = () => { state.isMicOn = true; render(); };
+            recognitionInstance.onresult = (e) => window.runAssessment(e.results[0][0].transcript);
+            
+            recognitionInstance.onerror = (e) => {
+                state.isMicOn = false;
+                recognitionInstance = null;
+                // 用戶主動放棄或 abort 時不需要報錯
+                if (e.error === 'aborted') return;
+                
+                if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+                    showMessage("請允許瀏覽器使用麥克風喔！", "error");
+                } else if (e.error === 'no-speech') {
+                    // 交給 onend 處理無聲提示，避免重複報錯
+                } else {
+                    showMessage("錄音發生錯誤，請重試", "error");
+                }
+                render();
+            };
+            
+            recognitionInstance.onend = () => { 
+                // 只有在 isMicOn 為 true 的情況下結束，才代表是不正常的提早中斷
+                if (state.isMicOn) {
+                    state.isMicOn = false; 
+                    recognitionInstance = null;
+                    // 加入畫面判斷，確保只在朗讀畫面才提示錯誤
+                    if (!state.evalResult && !state.message && state.view === 'reading-play') {
+                        showMessage("未偵測到聲音，請再試一次", "error");
+                    }
+                    render(); 
+                }
+            };
+            
+            try {
+                recognitionInstance.start();
+            } catch (err) {
+                console.error("麥克風啟動失敗", err);
+            }
+        };
+
+        window.speak = () => {
+            stopTTS();
+            let txtToSpeak = state.currentText.content;
+            
+            if (state.currentText.tts && state.currentText.tts[state.lang]) {
+                txtToSpeak = state.currentText.tts[state.lang];
+            }
+            
+            const u = new SpeechSynthesisUtterance(txtToSpeak);
+            u.lang = state.lang;
+            window.speechSynthesis.speak(u);
+        };
+
+        // --- 遊戲邏輯 ---
+        window.startIdiom = () => {
+            state.idiomGame.current = Math.floor(Math.random() * IDIOMS.length);
+            const q = IDIOMS[state.idiomGame.current];
+            q.shuffledOptions = [...q.options].sort(() => Math.random() - 0.5);
+        };
+
+        window.checkIdiom = (choice) => {
+            stopTTS();
+            const q = IDIOMS[state.idiomGame.current];
+            if (choice === q.a) { state.coins += 10; addExp(10); showMessage("正確！+10 💰", "success"); } 
+            else showMessage("正確是：" + q.a, "error"); 
+            saveState();
+            setTimeout(() => { window.startIdiom(); render(); }, 1500);
+            render();
+        };
+
+        // 心算邏輯
+        window.setMathType = (type) => {
+            stopTTS();
+            state.mathType = type;
+            window.startMath();
+            window.setView('math');
+        };
+
+        window.startMath = () => {
+            let n1, n2, q, a;
+            if (state.mathType === 'add') {
+                n1 = Math.floor(Math.random() * 10) + 1;
+                n2 = Math.floor(Math.random() * 10) + 1;
+                q = `${n1} + ${n2}`; a = n1 + n2;
+            } else if (state.mathType === 'sub') {
+                n1 = Math.floor(Math.random() * 10) + 1;
+                n2 = Math.floor(Math.random() * 10) + 1;
+                if (n1 < n2) { const temp = n1; n1 = n2; n2 = temp; } 
+                q = `${n1} - ${n2}`; a = n1 - n2;
+            } else if (state.mathType === 'mul') {
+                n1 = Math.floor(Math.random() * 10) + 1;
+                n2 = Math.floor(Math.random() * 10) + 1;
+                q = `${n1} × ${n2}`; a = n1 * n2;
+            } else if (state.mathType === 'div') {
+                a = Math.floor(Math.random() * 10) + 1; 
+                n2 = Math.floor(Math.random() * 10) + 1; 
+                n1 = a * n2; 
+                q = `${n1} ÷ ${n2}`; 
+            }
+            state.mathGame = { q, a };
+        };
+
+        window.checkMath = (val) => {
+            stopTTS();
+            if (val === '') return;
+            if (parseInt(val) === state.mathGame.a) {
+                state.coins += 5; addExp(5); showMessage("正確！+5 💰", "success"); 
+                document.getElementById('mathIn').value = '';
+                saveState(); window.startMath();
+            } else {
+                showMessage("再算一次看看！", "error"); 
+                document.getElementById('mathIn').value = '';
+            }
+            render();
+        };
+
+        function addExp(v) {
+            state.pet.exp += v;
+            if (state.pet.exp >= state.pet.level * 100) {
+                state.pet.exp -= state.pet.level * 100; state.pet.level++;
+                showMessage(`寵物升級到 Lv.${state.pet.level}！`, "success");
+            }
+        }
+
+        window.feedPet = () => {
+            stopTTS();
+            if (state.coins < 20) return showMessage("金幣不足", "error");
+            state.coins -= 20; state.pet.hunger = Math.min(100, state.pet.hunger + 30);
+            updatePetStatusImmediate(); showMessage("寵物吃飽了！💰-20", "success"); render();
+        };
+
+        window.cleanPet = () => {
+            stopTTS();
+            if (state.coins < 10) return showMessage("金幣不足", "error");
+            state.coins -= 10; state.pet.hygiene = Math.min(100, state.pet.hygiene + 40);
+            updatePetStatusImmediate(); showMessage("寵物變乾淨了！💰-10", "success"); render();
+        };
+
+        // --- 畫面渲染 ---
+        function render() {
+            const root = document.getElementById('app-root');
+            
+            if (state.view === 'login') {
+                root.innerHTML = `
+                    <div class="h-full flex flex-col justify-center items-center p-8 bg-gradient-to-b from-indigo-50 to-white">
+                        <div class="w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-lg mb-6 pet-bounce text-5xl">🐱</div>
+                        <h1 class="text-2xl font-black text-indigo-900 mb-2">AI 學習朗讀王</h1>
+                        <p class="text-sm text-gray-500 mb-8 font-bold">登入你的專屬雲端寵物</p>
+                        
+                        <div class="w-full space-y-4">
+                            <input type="text" id="usernameInput" class="w-full px-5 py-4 rounded-2xl border-2 border-indigo-100 bg-white text-center text-lg font-bold shadow-sm focus:outline-none focus:border-indigo-400" placeholder="輸入你的名字 (如: 小明)" onkeyup="if(event.key==='Enter') handleLogin()">
+                            <button type="button" onclick="handleLogin()" class="w-full bg-indigo-500 text-white py-4 rounded-2xl font-black text-lg shadow-md btn-active">進入遊戲</button>
+                        </div>
+                    </div>
+                ` + renderToast();
+                lucide.createIcons();
+                return;
+            }
+
+            if (state.view === 'loading') {
+                root.innerHTML = `<div class="h-full flex flex-col justify-center items-center"><div class="animate-spin mb-4"><i data-lucide="loader-2" class="w-10 h-10 text-indigo-500"></i></div><p class="font-bold text-gray-500">連接雲端中...</p></div>` + renderToast();
+                lucide.createIcons();
+                return;
+            }
+
+            const nav = `
+                <div class="px-5 py-4 flex justify-between items-center bg-white border-b border-gray-100 z-10 relative">
+                    <div class="flex items-center gap-3">
+                        <div class="flex items-center gap-1.5 bg-yellow-400/20 px-3 py-1.5 rounded-full">
+                            <i data-lucide="coins" class="w-4 h-4 text-yellow-600"></i>
+                            <span class="font-black text-yellow-700">${state.coins}</span>
+                        </div>
+                        <div class="text-xs font-bold text-gray-400 max-w-[100px] truncate">👤 ${currentUser}</div>
+                    </div>
+                    <div class="flex gap-2">
+                        ${state.view !== 'home' ? `<button type="button" onclick="setView('home')" class="p-2 bg-gray-50 rounded-full btn-active"><i data-lucide="home" class="w-5 h-5 text-gray-600"></i></button>` : ''}
+                        <button type="button" onclick="handleLogout()" class="p-2 bg-rose-50 rounded-full btn-active text-rose-500"><i data-lucide="log-out" class="w-5 h-5"></i></button>
+                    </div>
+                </div>
+            `;
+
+            let bodyHtml = "";
+            if (state.view === 'home') {
+                let badgesHtml = '<div class="flex justify-center gap-1 mb-2 mt-2" title="保持飽食和清潔80%以上滿24小時可獲得">';
+                for (let i = 0; i < 5; i++) badgesHtml += `<i data-lucide="award" class="w-6 h-6 ${i < state.pet.badges ? 'text-yellow-400 fill-yellow-400' : 'text-gray-200'}"></i>`;
+                badgesHtml += '</div>';
+
+                bodyHtml = nav + `
+                    <div class="scroll-area space-y-4 pb-10">
+                        <div class="bg-indigo-600 p-6 rounded-[2.5rem] text-white flex justify-between items-center">
+                            <div><h1 class="text-xl font-black">你好，${currentUser}！</h1><p class="opacity-80 text-xs mt-1">今天想學些什麼？</p></div>
+                            <div class="text-right"><p class="text-xs opacity-70">寵物等級</p><p class="text-xl font-black">Lv.${state.pet.level}</p></div>
+                        </div>
+                        <div class="bg-white border-2 border-gray-50 rounded-[2.5rem] p-6 text-center shadow-sm">
+                            <div class="pet-bounce text-6xl mb-1">🐱</div>
+                            ${badgesHtml}
+                            <div class="grid grid-cols-2 gap-4 mb-4 mt-2">
+                                <div><div class="flex justify-between text-xs font-bold text-gray-400 mb-1"><span>飽食度</span><span class="${state.pet.hunger < 80 ? 'text-red-500' : ''}">${state.pet.hunger}%</span></div><div class="progress-bar"><div class="progress-fill ${state.pet.hunger < 80 ? 'bg-red-400' : 'bg-orange-400'}" style="width:${state.pet.hunger}%"></div></div></div>
+                                <div><div class="flex justify-between text-xs font-bold text-gray-400 mb-1"><span>清潔度</span><span class="${state.pet.hygiene < 80 ? 'text-red-500' : ''}">${state.pet.hygiene}%</span></div><div class="progress-bar"><div class="progress-fill ${state.pet.hygiene < 80 ? 'bg-red-400' : 'bg-blue-400'}" style="width:${state.pet.hygiene}%"></div></div></div>
+                            </div>
+                            <div class="flex gap-2">
+                                <button type="button" onclick="feedPet()" class="flex-1 py-2 bg-orange-100 text-orange-600 rounded-xl font-bold text-sm btn-active shadow-sm">餵食 (20💰)</button>
+                                <button type="button" onclick="cleanPet()" class="flex-1 py-2 bg-blue-100 text-blue-600 rounded-xl font-bold text-sm btn-active shadow-sm">洗澡 (10💰)</button>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 gap-3">
+                            <button type="button" onclick="setView('reading-grade')" class="bg-rose-500 text-white p-5 rounded-3xl flex items-center gap-4 btn-active text-left shadow-sm">
+                                <div class="p-3 bg-white/20 rounded-2xl"><i data-lucide="mic"></i></div>
+                                <div><p class="font-black text-lg">朗讀大師</p><p class="text-xs opacity-70">詩詞與寓言故事</p></div>
+                            </button>
+                            <button type="button" onclick="setView('idiom')" class="bg-blue-500 text-white p-5 rounded-3xl flex items-center gap-4 btn-active text-left shadow-sm">
+                                <div class="p-3 bg-white/20 rounded-2xl"><i data-lucide="book-open"></i></div>
+                                <div><p class="font-black text-lg">成語高手</p><p class="text-xs opacity-70">初小必學成語挑戰</p></div>
+                            </button>
+                            <button type="button" onclick="setView('math-menu')" class="bg-amber-500 text-white p-5 rounded-3xl flex items-center gap-4 btn-active text-left shadow-sm">
+                                <div class="p-3 bg-white/20 rounded-2xl"><i data-lucide="calculator"></i></div>
+                                <div><p class="font-black text-lg">心算大王</p><p class="text-xs opacity-70">加減乘除分類挑戰</p></div>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'reading-grade') {
+                bodyHtml = nav + `<div class="scroll-area grid grid-cols-2 gap-3">
+                    ${['P1','P2','P3','P4','P5','P6'].map(g => `<button type="button" onclick="setGrade('${g}')" class="p-8 bg-white border-2 border-gray-100 rounded-3xl font-black text-xl btn-active shadow-sm">${g}</button>`).join('')}
+                </div>`;
+            } else if (state.view === 'reading-lang') {
+                bodyHtml = nav + `<div class="scroll-area flex flex-col gap-3">
+                    <button type="button" onclick="setLang('zh-HK')" class="p-6 bg-white border-2 border-gray-100 rounded-3xl font-bold btn-active shadow-sm text-lg">廣東話 (Cantonese)</button>
+                    <button type="button" onclick="setLang('zh-CN')" class="p-6 bg-white border-2 border-gray-100 rounded-3xl font-bold btn-active shadow-sm text-lg">普通話 (Mandarin)</button>
+                    <button type="button" onclick="setLang('en-US')" class="p-6 bg-white border-2 border-gray-100 rounded-3xl font-bold btn-active shadow-sm text-lg">English (英語)</button>
+                </div>`;
+            } else if (state.view === 'reading-list') {
+                const list = READING_DB[state.grade][state.lang];
+                bodyHtml = nav + `<div class="scroll-area space-y-3">
+                    ${list.map((item, i) => `
+                        <button type="button" onclick="playText(${i})" class="w-full p-5 bg-white rounded-3xl text-left border border-gray-100 flex justify-between items-center btn-active shadow-sm">
+                            <div><p class="font-black">${item.title}</p></div><i data-lucide="chevron-right" class="text-gray-400"></i>
+                        </button>
+                    `).join('')}
+                </div>`;
+            } else if (state.view === 'reading-play') {
+                const content = state.evalResult ? 
+                    state.evalResult.words.map(w => `<span class="word-${w.status}">${w.char}</span>`).join('') : 
+                    `<span>${state.currentText.content}</span>`;
+                
+                bodyHtml = nav + `
+                    <div class="scroll-area flex flex-col items-center">
+                        <div class="bg-gray-50 p-6 rounded-[2rem] w-full mb-8 text-2xl text-center leading-loose font-medium tracking-wide">${content}</div>
+                        ${state.evalResult ? `
+                            <div class="flex gap-4 w-full px-4 mb-4">
+                                <button type="button" onclick="retryReading()" class="flex-1 p-4 rounded-2xl bg-gray-200 text-gray-700 font-bold btn-active text-center">重新朗讀</button>
+                                <button type="button" onclick="setView('reading-list')" class="flex-1 p-4 rounded-2xl bg-rose-500 text-white font-bold btn-active text-center">返回列表</button>
+                            </div>
+                        ` : `
+                            <button type="button" onclick="toggleMic()" class="w-24 h-24 rounded-full ${state.isMicOn ? 'bg-rose-600 recording-glow' : 'bg-rose-500'} text-white flex items-center justify-center shadow-xl btn-active transition-colors"><i data-lucide="${state.isMicOn ? 'square' : 'mic'}" class="w-10 h-10"></i></button>
+                            <p class="mt-4 text-sm font-bold ${state.isMicOn ? 'text-rose-500' : 'text-gray-400'}">${state.isMicOn ? '錄音中... 點擊停止' : '點擊開始朗讀'}</p>
+                            <button type="button" onclick="speak()" class="mt-6 text-indigo-500 text-sm font-bold flex items-center gap-1 btn-active px-4 py-2 bg-indigo-50 rounded-full"><i data-lucide="volume-2" class="w-4 h-4"></i> 老師示範讀音</button>
+                        `}
+                    </div>
+                `;
+            } else if (state.view === 'idiom') {
+                const q = IDIOMS[state.idiomGame.current];
+                bodyHtml = nav + `
+                    <div class="scroll-area flex flex-col gap-4">
+                        <div class="bg-blue-50 p-6 rounded-3xl text-center font-bold text-lg leading-relaxed">${q.q}</div>
+                        <div class="grid grid-cols-2 gap-3">
+                            ${(q.shuffledOptions || q.options).map(o => `<button type="button" onclick="checkIdiom('${o}')" class="p-5 bg-white border-2 border-gray-100 rounded-2xl btn-active font-black text-gray-700 shadow-sm text-center">${o}</button>`).join('')}
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'math-menu') {
+                bodyHtml = nav + `
+                    <div class="scroll-area flex flex-col gap-4">
+                        <h2 class="text-xl font-black text-center text-amber-700 mb-2">請選擇挑戰項目</h2>
+                        <div class="grid grid-cols-2 gap-4">
+                            <button type="button" onclick="setMathType('add')" class="p-8 bg-white border-2 border-amber-100 rounded-3xl flex flex-col items-center justify-center gap-2 btn-active shadow-sm text-amber-600">
+                                <i data-lucide="plus" class="w-10 h-10"></i><span class="font-black text-lg">加法</span>
+                            </button>
+                            <button type="button" onclick="setMathType('sub')" class="p-8 bg-white border-2 border-amber-100 rounded-3xl flex flex-col items-center justify-center gap-2 btn-active shadow-sm text-amber-600">
+                                <i data-lucide="minus" class="w-10 h-10"></i><span class="font-black text-lg">減法</span>
+                            </button>
+                            <button type="button" onclick="setMathType('mul')" class="p-8 bg-white border-2 border-amber-100 rounded-3xl flex flex-col items-center justify-center gap-2 btn-active shadow-sm text-amber-600">
+                                <i data-lucide="x" class="w-10 h-10"></i><span class="font-black text-lg">乘法</span>
+                            </button>
+                            <button type="button" onclick="setMathType('div')" class="p-8 bg-white border-2 border-amber-100 rounded-3xl flex flex-col items-center justify-center gap-2 btn-active shadow-sm text-amber-600">
+                                <i data-lucide="divide" class="w-10 h-10"></i><span class="font-black text-lg">除法</span>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'math') {
+                const typeName = { add: '加法', sub: '減法', mul: '乘法', div: '除法' }[state.mathType];
+                bodyHtml = nav + `
+                    <div class="scroll-area flex flex-col items-center gap-4">
+                        <div class="w-full flex justify-between items-center mb-2">
+                            <span class="bg-amber-100 text-amber-700 px-3 py-1 rounded-full font-bold text-sm">${typeName}挑戰</span>
+                            <button type="button" onclick="setView('math-menu')" class="text-gray-400 text-sm font-bold flex items-center gap-1 btn-active"><i data-lucide="arrow-left" class="w-4 h-4"></i> 更換</button>
+                        </div>
+                        <div class="text-5xl font-black text-amber-600 p-10 bg-amber-50 rounded-[3rem] w-full text-center shadow-inner tracking-widest">${state.mathGame.q} = ?</div>
+                        <input type="number" id="mathIn" class="w-full p-5 bg-white border-2 border-amber-100 rounded-2xl text-3xl font-black text-center shadow-sm" placeholder="輸入答案" onkeyup="if(event.key==='Enter') checkMath(this.value)">
+                        <button type="button" onclick="checkMath(document.getElementById('mathIn').value)" class="w-full bg-amber-500 text-white p-5 rounded-2xl font-black btn-active shadow-md text-xl mt-2">提交回答</button>
+                    </div>
+                `;
+            }
+
+            root.innerHTML = bodyHtml + renderToast();
+            lucide.createIcons();
+        }
+
+        function renderToast() {
+            return state.message ? `<div class="toast bg-gray-800 text-white px-6 py-3 rounded-full font-bold shadow-2xl flex items-center gap-2"><i data-lucide="${state.message.type === 'success' ? 'check-circle' : 'info'}" class="w-4 h-4"></i>${state.message.text}</div>` : "";
+        }
+
+        render();
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedUser = sessionStorage.getItem('readaloud_user');
+            if (savedUser && state.view === 'login') {
+                const input = document.getElementById('usernameInput');
+                if(input) input.value = savedUser;
+                handleLogin(); 
+            }
+        });
+
+    </script>
+</body>
+</html>
